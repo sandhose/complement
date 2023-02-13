@@ -3459,7 +3459,6 @@ func TestPartialStateJoin(t *testing.T) {
 	})
 
 	t.Run("Leaving a room immediately after joining does not wait for resync", func(t *testing.T) {
-		t.Skip("Not yet implemented (synapse#12802)")
 		// Prepare to listen for leave events from the HS under test.
 		// We're only expecting one leave event, but give the channel extra capacity
 		// to avoid deadlock if the HS does something silly.
