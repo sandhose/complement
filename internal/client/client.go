@@ -24,6 +24,7 @@ import (
 
 	"github.com/matrix-org/complement/internal/b"
 	"github.com/matrix-org/complement/internal/must"
+	"github.com/matrix-org/complement/internal/oidc"
 )
 
 const (
@@ -417,6 +418,10 @@ func (c *CSAPI) MustSyncUntil(t *testing.T, syncReq SyncReq, checks ...SyncCheck
 // LoginUser will log in to a homeserver and create a new device on an existing user.
 func (c *CSAPI) LoginUser(t *testing.T, localpart, password string) (userID, accessToken, deviceID string) {
 	t.Helper()
+	oidcIssuer := c.GetOidcIssuer(t)
+	if oidcIssuer != nil {
+		return c.LoginUserViaOIDC(t, localpart, password, *oidcIssuer)
+	}
 	reqBody := map[string]interface{}{
 		"identifier": map[string]interface{}{
 			"type": "m.id.user",
@@ -442,6 +447,10 @@ func (c *CSAPI) LoginUser(t *testing.T, localpart, password string) (userID, acc
 // return user ID & access token, and fail the test on network error
 func (c *CSAPI) RegisterUser(t *testing.T, localpart, password string) (userID, accessToken, deviceID string) {
 	t.Helper()
+	oidcIssuer := c.GetOidcIssuer(t)
+	if oidcIssuer != nil {
+		return c.RegisterUserViaOIDC(t, localpart, password, *oidcIssuer)
+	}
 	reqBody := map[string]interface{}{
 		"auth": map[string]string{
 			"type": "m.login.dummy",
@@ -1046,4 +1055,78 @@ func SyncToDeviceHas(fromUser string, check func(gjson.Result) bool) SyncCheckOp
 		}
 		return fmt.Errorf("SyncToDeviceHas(%v): %s", fromUser, err)
 	}
+}
+
+func (c *CSAPI) GetClientWellKnown(t *testing.T) *gjson.Result {
+	t.Helper()
+
+	res := c.DoFunc(t, "GET", []string{".well-known", "matrix", "client"})
+	if res.StatusCode != 200 {
+		return nil
+	}
+	wellKnownBytes := ParseJSON(t, res)
+	parsed := gjson.ParseBytes(wellKnownBytes)
+	return &parsed
+}
+
+func (c *CSAPI) GetOidcIssuer(t *testing.T) (issuer *string) {
+	t.Helper()
+
+	clientWellKnown := c.GetClientWellKnown(t)
+
+	if clientWellKnown == nil {
+		return nil
+	}
+
+	msc2965Section := clientWellKnown.Get("org\\.matrix\\.msc2965\\.authentication")
+
+	if msc2965Section.Exists() {
+		issuer := msc2965Section.Get("issuer").Str
+		return &issuer
+	}
+
+	return nil
+}
+
+func (c *CSAPI) LoginUserViaOIDC(t *testing.T, localpart, password, issuer string) (userID, accessToken, deviceID string) {
+	t.Helper()
+	accessToken, err := oidc.BuildAccessToken(localpart, "", "", false)
+	if err != nil {
+		t.Fatalf("unable to create OIDC access token: %v", err)
+	}
+	c.AccessToken = accessToken
+
+	// get data from whoami
+	res := c.MustDoFunc(t, "GET", []string{"_matrix", "client", "v3", "account", "whoami"})
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("unable to read response body: %v", err)
+	}
+
+	userID = gjson.GetBytes(body, "user_id").Str
+	accessToken = gjson.GetBytes(body, "access_token").Str
+	deviceID = gjson.GetBytes(body, "device_id").Str
+	return userID, accessToken, deviceID
+}
+
+func (c *CSAPI) RegisterUserViaOIDC(t *testing.T, localpart, password, issuer string) (userID, accessToken, deviceID string) {
+	t.Helper()
+	accessToken, err := oidc.BuildAccessToken(localpart, "", "", false)
+	if err != nil {
+		t.Fatalf("unable to create OIDC access token: %v", err)
+	}
+	c.AccessToken = accessToken
+
+	// get data from whoami
+	res := c.MustDoFunc(t, "GET", []string{"_matrix", "client", "v3", "account", "whoami"})
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("unable to read response body: %v", err)
+	}
+
+	userID = gjson.GetBytes(body, "user_id").Str
+	deviceID = gjson.GetBytes(body, "device_id").Str
+	return userID, c.AccessToken, deviceID
 }

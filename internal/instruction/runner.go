@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix/crypto/olm"
 
 	"github.com/matrix-org/complement/internal/b"
+	"github.com/matrix-org/complement/internal/oidc"
 )
 
 // An instruction for the runner to run.
@@ -151,6 +152,8 @@ func (r *Runner) RunInstructions(opts RunOpts, instrs []Instr) (resErr error) {
 
 // Run all instructions until completion. Return an error if there was a problem executing any instruction.
 func (r *Runner) Run(hs b.Homeserver, hsURL string) (resErr error) {
+	// FIXME: this is hardcoded to always treat as OIDC for now
+	hs.OIDC = true
 	userInstrSets := calculateUserInstructionSets(r, hs)
 	var wg sync.WaitGroup
 	wg.Add(len(userInstrSets))
@@ -404,9 +407,9 @@ func calculateUserInstructionSets(r *Runner, hs b.Homeserver) [][]instruction {
 
 		if createdUsers[user.Localpart] {
 			// login instead as the device ID may be different
-			instrs = append(instrs, instructionLogin(hs, user))
+			instrs = append(instrs, instructionLogin(r, hs, user))
 		} else {
-			instrs = append(instrs, instructionRegister(hs, user))
+			instrs = append(instrs, instructionRegister(r, hs, user))
 			if user.DisplayName != "" {
 				instrs = append(instrs, instructionDisplayName(hs, user))
 			}
@@ -565,7 +568,12 @@ func calculateRoomInstructionSets(r *Runner, hs b.Homeserver) [][]instruction {
 	return sets
 }
 
-func instructionRegister(hs b.Homeserver, user b.User) instruction {
+func instructionRegister(r *Runner, hs b.Homeserver, user b.User) instruction {
+	// login vs register is the same with OIDC
+	if hs.OIDC {
+		return instructionLogin(r, hs, user)
+	}
+
 	body := map[string]interface{}{
 		"username": user.Localpart,
 		"password": "complement_meets_min_pasword_req_" + user.Localpart,
@@ -605,7 +613,31 @@ func instructionDisplayName(hs b.Homeserver, user b.User) instruction {
 	}
 }
 
-func instructionLogin(hs b.Homeserver, user b.User) instruction {
+func instructionLogin(r *Runner, hs b.Homeserver, user b.User) instruction {
+	if hs.OIDC {
+		deviceID := ""
+		if user.DeviceID != nil {
+			deviceID = *user.DeviceID
+		}
+		accessToken, err := oidc.BuildAccessToken(user.Localpart, deviceID, user.DisplayName, false)
+		if err != nil {
+			log.Panicf("unable to create OIDC access token: %v", err)
+		}
+
+		atKey := fmt.Sprintf("user_@%s:%s", user.Localpart, hs.Name)
+
+		r.lookup.Store(atKey, accessToken)
+
+		return instruction{
+			method:      "GET",
+			path:        "/_matrix/client/v3/account/whoami",
+			accessToken: atKey,
+			storeResponse: map[string]string{
+				"device_@" + user.Localpart + ":" + hs.Name: ".device_id",
+			},
+		}
+	}
+
 	body := map[string]interface{}{
 		"type":     "m.login.password",
 		"user":     user.Localpart,
